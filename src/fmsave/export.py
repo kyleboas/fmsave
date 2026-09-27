@@ -24,6 +24,7 @@ import itertools
 import json
 import operator
 import os
+import re
 import types
 import typing
 from collections.abc import Callable, Generator, Iterable, Iterator, Mapping, Sequence
@@ -68,10 +69,9 @@ type _Step = _FieldRun | _FieldPlan
 _UNKNOWN_FIELD_NAME = "unknown"
 _CODE_SUFFIX = "_code"
 _CSV_ITEM_SEPARATOR = ";"
+_CSV_FORMULA_PREFIX = re.compile(r"^[\s\x00-\x1f]*[=+\-@＝＋－＠]|^[\t\r\n]")
 _MISSING_PAIR: tuple[None, None] = (None, None)
 _NONE_TYPE = type(None)
-# The csv module writes cells of exactly these types the way _csv_cell would.
-_CSV_NATIVE_TYPES: frozenset[type] = frozenset((str, int, _NONE_TYPE))
 _STR_ONLY: frozenset[type] = frozenset((str,))
 _INT_ONLY: frozenset[type] = frozenset((int,))
 _is_present: Callable[[object], bool] = functools.partial(operator.is_not, None)
@@ -1006,6 +1006,17 @@ def _csv_cell(value: object) -> str:
     return str(value)
 
 
+def _spreadsheet_safe_cell(value: object) -> object:
+    """Escape formula-like text, not numeric values, at the final CSV boundary."""
+    if type(value) is int or type(value) is float:
+        return value
+    text = _csv_cell(value)
+    # Some importers ignore leading whitespace/control characters before a formula.
+    if _CSV_FORMULA_PREFIX.match(text):
+        return "'" + text
+    return text
+
+
 def _cell_reader[KeyT](keys: list[KeyT]) -> Callable[[Any], tuple[object, ...]]:
     """Return the cells at the given keys of a row, as a tuple, for any number of keys."""
     if not keys:
@@ -1039,7 +1050,9 @@ def write_csv(
     list of plain values is joined with ";" (a None item is an empty segment), and one holding
     dicts is compact JSON text. Rows end with "\\r\\n", as in standard CSV. A path is opened
     and closed here; a stream is written to and left open, and should have been opened with
-    newline="".
+    newline="". Formula-like text cells and headers are prefixed with an apostrophe to
+    reduce spreadsheet formula injection risk. Numeric values are unchanged; use JSON
+    when exact text preservation matters.
 
     Raises:
         TypeError: columns is a single string instead of a sequence of names.
@@ -1051,17 +1064,9 @@ def write_csv(
     read_cells = _cell_reader(column_list)
     with _text_output(destination, newline="") as stream:
         writer = csv.writer(stream)
-        writer.writerow(column_list)
+        writer.writerow([_spreadsheet_safe_cell(name) for name in column_list])
         for flat_row in flat_rows:
-            # Strings and plain ints, the most common cells, skip the conversion call.
-            writer.writerow(
-                [
-                    cell
-                    if (cell_type := type(cell)) is str or cell_type is int
-                    else _csv_cell(cell)
-                    for cell in read_cells(flat_row)
-                ]
-            )
+            writer.writerow([_spreadsheet_safe_cell(cell) for cell in read_cells(flat_row)])
 
 
 def _write_records_csv[RecordT](  # pyright: ignore[reportUnusedFunction]
@@ -1106,7 +1111,7 @@ def _write_records_csv[RecordT](  # pyright: ignore[reportUnusedFunction]
         read_cells = _cell_reader([column_indexes[name] for name in column_list])
     with _text_output(destination, newline="") as stream:
         writer = csv.writer(stream)
-        writer.writerow(column_list)
+        writer.writerow([_spreadsheet_safe_cell(name) for name in column_list])
         writer.writerows(_csv_rows(records, record_type, class_plan, read_cells, operation_name))
 
 
@@ -1123,10 +1128,7 @@ def _csv_rows(
         cells: list[object] = []
         _append_csv_cells(cells, record, class_plan)
         row: Sequence[object] = cells if read_cells is None else read_cells(cells)
-        if not _CSV_NATIVE_TYPES.issuperset(map(type, row)):
-            # A value whose type its field does not declare, such as a bool in an int field.
-            row = [_csv_cell(cell) for cell in row]
-        yield row
+        yield [_spreadsheet_safe_cell(cell) for cell in row]
 
 
 def write_json(

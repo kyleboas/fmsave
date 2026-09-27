@@ -49,6 +49,13 @@ fmsave.export.column_names(fmsave.Player)  # ("uid", "unique_id", "name", ...)
 Nested JSON carries the label **and** the code, so **JSON is the lossless format**. Reach for it
 when you are handing the data to another program. CSV is for reading and for spreadsheets.
 
+In this fork, CSV writers prefix formula-like text cells and headers with an apostrophe.
+This applies to CLI exports and `Table.write_csv()` as well as `export.write_csv()`, including
+joined tuple cells. Leading whitespace/control characters do not bypass the formula-prefix
+check. Numeric values remain numeric. This intentionally changes some text values: use JSON
+for exact text preservation. Spreadsheet import settings or editing and re-saving a CSV may
+remove this protection; do not treat CSV as a safe container for arbitrary untrusted content.
+
 `to_dicts(json_ready=True)` gives the same nesting write_json uses: dates as ISO strings, tuples
 as lists, everything JSON-serialisable.
 

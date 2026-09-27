@@ -1,4 +1,9 @@
-# fmsave
+# fmsave hardening fork
+
+This is Kyle Boas's MIT-licensed fork of [rhiever/fmsave](https://github.com/rhiever/fmsave).
+It adds bounded, lazy compressed-region reads and spreadsheet formula protection for CSV.
+It is not a security certification. See [SECURITY.md](SECURITY.md) for scope and limitations.
+The documentation linked below describes the upstream API; fork-specific changes are noted here.
 
 Read your Football Manager 26 saves from disk into Python records, DataFrames, CSV and JSON.
 
@@ -9,10 +14,16 @@ Read your Football Manager 26 saves from disk into Python records, DataFrames, C
 fmsave needs Python 3.12 or newer.
 
 ```console
-uvx fmsave info path/to/career.fm   # try it without installing
-pip install fmsave
-pip install "fmsave[pandas]"        # adds Table.to_pandas()
+git clone https://github.com/kyleboas/fmsave
+cd fmsave
+git checkout security/harden-input-and-exports
+pip install .
+pip install ".[pandas]"            # optional: adds Table.to_pandas()
+fmsave info path/to/career.fm
 ```
+
+The hardening changes are on the branch above pending merge. `pip install fmsave` and
+`uvx fmsave` install upstream releases, not this fork.
 
 ## Quickstart
 
@@ -116,6 +127,10 @@ If the game is running, copy the save and read the copy.
 
 ## Safety
 
+CSV exports prefix formula-like text with an apostrophe, including text after leading whitespace
+or control characters. Numeric values are unchanged. Use JSON to preserve exact text. Spreadsheet
+import settings and later edits can undo CSV protection; see [SECURITY.md](SECURITY.md).
+
 fmsave is read-only. It never modifies saves, makes no network connections, and does not read game
 memory. Local single-player analysis is supported. Using hidden data to gain an advantage in a
 shared online career may break platform or community rules.
@@ -123,7 +138,7 @@ shared online career may break platform or community rules.
 ## Support
 
 fmsave is a hobby project, maintained on a best-effort basis. Report problems through
-[GitHub issues](https://github.com/rhiever/fmsave/issues). Never attach a save file; maintainers
+[the fork's GitHub issues](https://github.com/kyleboas/fmsave/issues). Never attach a save file; maintainers
 will not request or accept one. See [CONTRIBUTING.md](CONTRIBUTING.md) for how to report a wrong
 value without sharing real data. To request removal of any content, open an issue with the rights
 request form.
