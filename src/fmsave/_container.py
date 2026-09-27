@@ -14,7 +14,7 @@ import os
 import re
 import struct
 import sys
-from collections.abc import Generator, Iterator, Mapping, Sequence
+from collections.abc import Generator, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -40,6 +40,8 @@ SECTION_EXTENSIONS = frozenset({".dat", ".cmt"})
 MATCH_FILE_EXTENSIONS = frozenset({".apm", ".scm"})
 DEFAULT_TOTAL_DECOMPRESSED_CAP = 4 * 1024**3
 DEFAULT_FRAME_DECOMPRESSED_CAP = 1024**3
+# Allow compression overhead for an incompressible frame at the decompressed limit.
+DEFAULT_FRAME_COMPRESSED_CAP = DEFAULT_FRAME_DECOMPRESSED_CAP + 1024**2
 MAX_TRAILER_COMPRESSED_BYTES = 64 * 1024**2
 MAX_TRAILER_DECOMPRESSED_BYTES = 64 * 1024**2
 MAX_SAVE_NAME_BYTES = 4096
@@ -66,6 +68,7 @@ class ContainerLimits:
 
     total_decompressed_cap: int = DEFAULT_TOTAL_DECOMPRESSED_CAP
     frame_decompressed_cap: int = DEFAULT_FRAME_DECOMPRESSED_CAP
+    frame_compressed_cap: int = DEFAULT_FRAME_COMPRESSED_CAP
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,7 +178,7 @@ def read_index(
     path: str | os.PathLike[str], limits: ContainerLimits | None = None
 ) -> ContainerIndex:
     """Read the header and trailer directory; the file is closed before this returns."""
-    save_path = Path(path)
+    save_path = Path(path).absolute()
     file_name = save_path.name
     effective_limits = limits or ContainerLimits()
     with save_path.open("rb") as save_file:
@@ -309,6 +312,8 @@ def validate_entries(
             raise CorruptSaveError(
                 f"{file_name}: {label} points outside the frame area. {RETRY_HINT}"
             )
+        if entry.compressed_size > limits.frame_compressed_cap:
+            raise CorruptSaveError(f"{file_name}: {label} is larger than the compressed-frame cap")
         if entry.decompressed_size > limits.frame_decompressed_cap:
             raise CorruptSaveError(f"{file_name}: {label} is larger than the per-frame cap")
         total_decompressed += entry.decompressed_size
@@ -586,24 +591,41 @@ def walk_frames(container_index: ContainerIndex, region_name: str) -> tuple[Fram
 
 
 def read_region_frames(container_index: ContainerIndex, region_name: str) -> Iterator[bytes]:
-    """Read a region's frames with one short file open, then decompress them lazily."""
+    """Read and decompress one bounded frame at a time, closing the file before each yield."""
     region = region_named(container_index, region_name)
     file_name = container_index.file_name
     with open_verified(container_index) as save_file:
         spans = walk_frame_headers(save_file, region.start, region.end, file_name)
-        compressed_frames = [
-            read_exact(save_file, span.offset, span.size, file_name)
-            for span in spans
-            if not span.skippable
-        ]
+    for span in spans:
+        if not span.skippable and span.size > container_index.limits.frame_compressed_cap:
+            raise CorruptSaveError(
+                f"{file_name}: region {region_name!r} exceeds the compressed-frame cap"
+            )
     declared_total = sum(entry.decompressed_size for entry in container_index.entries)
     return decompress_region_frames(
-        compressed_frames, container_index.limits, declared_total, region_name, file_name
+        read_compressed_region_frames(container_index, spans),
+        container_index.limits,
+        declared_total,
+        region_name,
+        file_name,
     )
 
 
+def read_compressed_region_frames(
+    container_index: ContainerIndex, spans: Sequence[FrameSpan]
+) -> Iterator[bytes]:
+    """Keep no file descriptor open while a caller processes a frame or stops early."""
+    for span in spans:
+        if span.skippable:
+            continue
+        with open_verified(container_index) as save_file:
+            compressed = read_exact(save_file, span.offset, span.size, container_index.file_name)
+        yield compressed
+        del compressed
+
+
 def decompress_region_frames(
-    compressed_frames: list[bytes],
+    compressed_frames: Iterable[bytes],
     limits: ContainerLimits,
     declared_total: int,
     region_name: str,
@@ -615,7 +637,9 @@ def decompress_region_frames(
         frame_bytes = decompress_frame(
             compressed_frame,
             expected_size=None,
-            cap=limits.frame_decompressed_cap,
+            cap=min(
+                limits.frame_decompressed_cap, limits.total_decompressed_cap - total_decompressed
+            ),
             what=f"frame {frame_number} of region {region_name!r}",
             file_name=file_name,
         )
@@ -625,3 +649,4 @@ def decompress_region_frames(
                 f"{file_name}: region {region_name!r} exceeds the total decompression cap"
             )
         yield frame_bytes
+        del frame_bytes, compressed_frame
